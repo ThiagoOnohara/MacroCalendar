@@ -1,0 +1,4 @@
+pandas
+pywin32
+xlwings
+investpy
