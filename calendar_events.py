@@ -324,7 +324,7 @@ def logging_func():
     print('__package__', __package__)
 
 def get_com_object(object_type='my_calendar'):    
-    my_calendar_name = 'FX'
+    my_calendar_name = 'MyCalendar'
     outlook = win32com.client.Dispatch('Outlook.Application')
     namespace = outlook.GetNamespace('MAPI')
     if object_type == 'outlook':
