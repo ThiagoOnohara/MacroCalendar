@@ -32,7 +32,7 @@ Fluxo típico:
 1. Buscar calendário econômico (inflation, employment, central_banks, activity).
 2. Pré‑processar (normalização de nomes, remoção de duplicatas, filtros por relevância/termos).
 3. (Opcional) Enviar a **aba `EVENTS`** no Excel para revisão.
-4. Publicar no **Calendário do Outlook** (subpasta "FX" por padrão), com **categorias de cor** por tipo de evento e **lembrete**.
+4. Publicar no **Calendário do Outlook** (subpasta "MyCalendar" por padrão), com **categorias de cor** por tipo de evento e **lembrete**.
 
 ---
 
@@ -80,7 +80,7 @@ Abra `calendar_events.py` e ajuste os pontos abaixo, se necessário:
 
 1) **Subpasta do calendário no Outlook**
 ```python
-my_calendar_name = 'FX'  # nome da subpasta do seu calendário
+my_calendar_name = 'MyCalendar'  # nome da subpasta do seu calendário
 ```
 Crie essa subpasta no Outlook (Calendário → Clique direito → Novo Calendário) ou troque o nome para uma pasta que já exista.
 
