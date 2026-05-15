@@ -1,22 +1,59 @@
 # -*- coding: utf-8 -*-
 """
+Created on Fri Nov  8 12:39:11 2024
+
 @author: thiago.onohara
 """
 
+import matplotlib.pyplot as plt
 import pandas as pd
-import os
+import numpy as np
+import sys
 from functools import reduce
 from datetime import datetime, timedelta
 import re
-from functools import reduce
+sys.path.append('F:/Front/Moedas/Base/')
+sys.path.append('G:/Front/Moedas/Utils/Thiago/scripts/')
 from eco_calendar import EcoCalendar
-from collections import Counter
+from investing_calendar import InvestingAPIClient
 import xlwings as xw
-import win32com.client as win32
+import win32com.client
 
-calendar = EcoCalendar()
+'''
+try:
+    eco_calendar = EcoCalendar()
+    countries=[
+        'spain',
+        'france',
+        'united kingdom',
+        'italy',
+        'germany',
+        'united states', 
+        'japan',
+        'brazil',
+        'mexico'
+    ]
+    
+    test = eco_calendar.get_economic_calendar(
+        from_date=datetime.today()-timedelta(days=10),
+        to_date=datetime.today()+timedelta(days=15),
+        categories=['economic_activity'],
+        countries=countries)
+    
+    if not test.empty:
+        calendar = eco_calendar
+        
+except:'''
+
+calendar = InvestingAPIClient()
 
 #%% UTILS
+#Metrics (não ativas)
+sharpe = lambda series: np.sqrt(252)*series.mean()/series.std()
+hitratio = lambda series: series[series>0].count()/series.count()
+pct = lambda series: series[series!=0].dropna().count()/series[series!=0].dropna().shape[0]
+count = lambda series: series.count()
+
 def merge_dfs(dfs, on=[]):
   """
   Merges a list of DataFrames using reduce.
@@ -101,6 +138,7 @@ country_employment = {
     'euro zone':'eur'
     }
 
+from collections import Counter
 def tokenize(text):
     return re.findall(r'\b\w+\b', text.lower())
 
@@ -169,7 +207,9 @@ def get_calendar_from_investing(next_days=7):
         countries=countries_activity)
     
     def pre_filter_events(df):
-        data_not_duplt = df.copy().drop(['id', 'actual', 'forecast', 'previous'], axis=1)
+        base_drop_cols = ['id', 'actual', 'forecast', 'previous']
+        matched_drop_cols = df.columns.intersection(pd.Index(base_drop_cols))
+        data_not_duplt = df.copy().drop(matched_drop_cols, axis=1)
         data_not_duplt['event_lower'] = data_not_duplt['event'].str.split('(').str[0].str.strip().str.lower()
         data_not_duplt_ = data_not_duplt.drop_duplicates(subset=['date', 'time', 'zone', 'event_lower'], keep='first')
         return data_not_duplt_
@@ -324,7 +364,6 @@ def logging_func():
     print('__package__', __package__)
 
 def get_com_object(object_type='my_calendar'):    
-    my_calendar_name = 'MyCalendar'
     outlook = win32com.client.Dispatch('Outlook.Application')
     namespace = outlook.GetNamespace('MAPI')
     if object_type == 'outlook':
@@ -332,7 +371,7 @@ def get_com_object(object_type='my_calendar'):
     if object_type == 'calendar':
         return namespace.GetDefaultFolder(9) #9=olFolderCalendar
     if object_type == 'my_calendar':
-        return namespace.GetDefaultFolder(9).Folders[my_calendar_name] # nome exato da subpasta
+        return namespace.GetDefaultFolder(9).Folders['FX'] # nome exato da subpasta
 
 def find_existing(subject_ls:list, start_dt:datetime, obj_type='my_calendar'):
     """Retorna uma lista de AppointmentItems com mesmo assunto e data exata."""
@@ -354,8 +393,8 @@ def find_existing(subject_ls:list, start_dt:datetime, obj_type='my_calendar'):
 
 @xw.sub
 def add_to_agenda():
-    mail_adress = '@youradress.com'
-    emails = [os.getlogin()]
+    mail_adress = '@legacycapital.com.br'
+    emails = ['thiago.onohara']
     emails_completos = [i+mail_adress for i in emails]
     # Suponha df com colunas: date (YYYY-MM-DD), time (HH:MM), zone (e.g. 'America/Sao_Paulo'), event (str)
     
@@ -382,6 +421,7 @@ def add_to_agenda():
         'France':'FRA',
         'India': 'INR',
         'Türkiye':'TRY',
+        'Turkey':'TRY',
         'Spain': 'SPN',
         'Italy': 'ITL',
         'Chile': 'CLP', 
@@ -462,12 +502,175 @@ def add_to_agenda():
         
 def send_logging_email():
         
+    import win32com.client as win32
     outlook = win32.Dispatch('outlook.application')
     mail = outlook.CreateItem(0)
-    mail.To = 'mailTo'
+    mail.To = 'thiago.onohara@legacycapital.com.br'
     mail.Subject = 'TASK COMPLETA -> Calendário Atualizado'
     mail.Send()
-      
+
+#%%
+@xw.sub
+def month_end_rates_task():
+    
+    mail_adress = '@legacycapital.com.br'
+    emails = ['thiago.onohara', 'mleal']
+    emails_completos = [i+mail_adress for i in emails]
+        
+    today = pd.to_datetime('today').date()
+    end_of_year = pd.to_datetime(f'{today.year+1}-12-31').date()
+    dates_rng = pd.date_range(start=today, end=end_of_year, freq='B', name='dates')
+    dates_rng_df = dates_rng.to_frame(index=False)
+    dates_rng_df['month'] = dates_rng_df['dates'].dt.month
+    dates_rng_df['Ym'] = dates_rng_df['dates'].dt.strftime('%Y-%m')
+
+    last_dt_month = dates_rng_df.groupby('Ym')['dates'].max()
+    last_dt_month = last_dt_month[last_dt_month.dt.day>=25]
+    
+    month_end_dates = last_dt_month.to_frame('month_end')
+    month_end_dates['trade_start'] = month_end_dates['month_end'] - pd.tseries.offsets.BusinessDay(4)
+    month_end_dates['trade_end'] = month_end_dates['month_end'] + pd.tseries.offsets.BusinessDay(1)
+    
+    month_end_dates_ = month_end_dates.reset_index()
+    
+    for i, row in month_end_dates_.iterrows():
+        remind_before = 15 #minutes  # por exemplo, duração 15min
+        evento = 'Month End Rates'
+        
+        month_end = row['month_end']
+        month_ref = month_end.strftime('%Y-%m')
+        
+        trade_start = row['trade_start']
+        trade_end = row['trade_end']
+
+        
+        start = datetime(year=trade_start.year, month=trade_start.month, day=trade_start.day, hour=8)
+         # Monta o datetime com timezone
+        end = datetime(year=trade_end.year, month=trade_end.month, day=trade_end.day, hour=8)
+    
+        subject = f"{month_ref} | {evento}"
+        
+        # Cria o Appointment (1 = olAppointmentItem)
+        appt = get_com_object(object_type='outlook').CreateItem(1)
+        
+        exists = find_existing([subject], start)
+        
+        if exists:
+            # atualiza o primeiro que encontrar
+            appt = exists[0]
+            print(f"→ Atualizando evento existente: {subject}")
+        else:
+            # cria novo
+            appt = get_com_object(object_type='my_calendar').Items.Add(1)
+            print(f"→ Criando novo evento: {subject}")
+        
+        appt.Subject = subject
+        appt.Start = start.strftime('%Y-%m-%d %H:%M')
+        appt.End = end.strftime('%Y-%m-%d %H:%M')
+    
+        # Deixa como "Free" no calendário, mas com lembrete
+        appt.BusyStatus = 0             # 0 = olFree
+        appt.ReminderSet = True
+        appt.ReminderMinutesBeforeStart = remind_before
+        
+        appt.Categories = "Yellow category"
+    
+        # marca os Required Attendees, mas NÃO converte em Meeting    
+        # Aqui: transforma lista em string "email1; email2; ..."
+        if isinstance(emails_completos, list) and emails_completos:
+            appt.RequiredAttendees = "; ".join(emails_completos)
+        else:
+            appt.RequiredAttendees = ""
+    
+        # só salva—não envia convites
+        appt.Save()
+        print(f"✔ Appointment '{subject}' às {start} (free) criado com lembrete.")
+            
+        
+@xw.sub
+def qra_announcements_task():
+    
+    mail_adress = '@legacycapital.com.br'
+    emails = ['thiago.onohara', 'mleal', 'marco.lyrio']
+    emails_completos = [i+mail_adress for i in emails]
+        
+    today = pd.to_datetime('today').date()
+    start_of_year = pd.to_datetime(f'{today.year}-01-01').date()
+    end_of_next_year = pd.to_datetime(f'{today.year+1}-12-31').date()
+    dates_rng = pd.date_range(start=start_of_year, end=end_of_next_year , freq='B', name='dates')
+
+    months_final = [1, 4, 7, 10] #fim dos trimestres
+    months_start = [2, 5, 8, 11] #se passar o fim, primeira semana após
+    
+    dates_rng_mon = dates_rng[dates_rng.weekday==0]
+    
+    dates_rng_mon_df = dates_rng_mon.to_frame(index=False)
+    
+    dates_rng_mon_df_final = dates_rng_mon_df[dates_rng_mon_df['dates'].dt.month.isin(months_final)]
+    dates_rng_mon_df_start = dates_rng_mon_df[dates_rng_mon_df['dates'].dt.month.isin(months_start)]
+    
+    dates_rng_mon_df_final_last = dates_rng_mon_df_final.groupby(dates_rng_mon_df_final['dates'].dt.month).last()
+    dates_rng_mon_df_start_first = dates_rng_mon_df_start.groupby(dates_rng_mon_df_start['dates'].dt.month).first()
+    
+    possible_year_qra_dates = pd.concat([dates_rng_mon_df_final_last, dates_rng_mon_df_start_first])
+    possible_year_qra_dates.index.name = 'month'
+    
+    possible_year_qra_dates_ = possible_year_qra_dates.reset_index()
+    
+    possible_year_qra_dates_['trade_start'] = possible_year_qra_dates_['dates'] - pd.tseries.offsets.BusinessDay(3)
+    possible_year_qra_dates_['trade_end'] = possible_year_qra_dates_['dates'] + pd.tseries.offsets.BusinessDay(3)
+    possible_year_qra_dates_
+    
+    for i, row in possible_year_qra_dates_.iterrows():
+        remind_before = 15  #minutes  # por exemplo, duração 15min
+        evento = 'Possible QRA pré Drift [APLICAR TSY no FECHAMENTO], melhor retorno [Sexta-Feira: D-1 QRA]'
+        
+        qra = row['dates']
+        quarter_ref = (qra.month - 1) // 3 + 1
+
+        trade_start = row['trade_start']
+        trade_end = row['trade_end']
+
+        start = datetime(year=trade_start.year, month=trade_start.month, day=trade_start.day, hour=8)
+        end = datetime(year=trade_end.year, month=trade_end.month, day=trade_end.day, hour=8)
+    
+        subject = f"Q{quarter_ref} | {evento}"
+        
+        # Cria o Appointment (1 = olAppointmentItem)
+        appt = get_com_object(object_type='outlook').CreateItem(1)
+        
+        exists = find_existing([subject], start)
+        
+        if exists:
+            # atualiza o primeiro que encontrar
+            appt = exists[0]
+            print(f"→ Atualizando evento existente: {subject}")
+        else:
+            # cria novo
+            appt = get_com_object(object_type='my_calendar').Items.Add(1)
+            print(f"→ Criando novo evento: {subject}")
+        
+        appt.Subject = subject
+        appt.Start = start.strftime('%Y-%m-%d %H:%M')
+        appt.End = end.strftime('%Y-%m-%d %H:%M')
+    
+        # Deixa como "Free" no calendário, mas com lembrete
+        appt.BusyStatus = 0             # 0 = olFree
+        appt.ReminderSet = True
+        appt.ReminderMinutesBeforeStart = remind_before
+        
+        appt.Categories = "Orange category"
+    
+        # marca os Required Attendees, mas NÃO converte em Meeting    
+        # Aqui: transforma lista em string "email1; email2; ..."
+        if isinstance(emails_completos, list) and emails_completos:
+            appt.RequiredAttendees = "; ".join(emails_completos)
+        else:
+            appt.RequiredAttendees = ""
+    
+        # só salva—não envia convites
+        appt.Save()
+        print(f"✔ Appointment '{subject}' às {start} (free) criado com lembrete.")
         
 #%% For task execution>
 
@@ -475,10 +678,13 @@ def _run_scheduled_task():
     """Funções que só devem rodar no Task Scheduler"""
     print('Running AS TASK!!!')
     add_to_agenda()
+    month_end_rates_task()
+    qra_announcements_task()
     send_logging_email()
 
 #print('__name__', __name__)
 
+# <-- aqui o sentinela
 if __name__ == "__main__":
     print('__name__', __name__)
     _run_scheduled_task()
