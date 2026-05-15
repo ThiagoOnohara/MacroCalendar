@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """
-Created on Fri Nov  8 12:39:11 2024
-
 @author: thiago.onohara
 """
 
