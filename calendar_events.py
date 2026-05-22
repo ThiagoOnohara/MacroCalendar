@@ -142,6 +142,7 @@ def get_calendar_from_investing(next_days=7):
     countries_central_banks =list(country_cb.keys())
     countries_employment =list(country_employment.keys())
     countries_activity =list(country_total.keys())
+    countries_holidays =list(country_total.keys())
 
     #Inflation Events
     data_inflation = calendar.get_economic_calendar(
@@ -168,6 +169,19 @@ def get_calendar_from_investing(next_days=7):
         to_date=datetime.today()+timedelta(days=next_days),
         categories=['economic_activity'],
         countries=countries_activity)
+
+    #Market Holidays (legacy endpoint from Investing Holiday Calendar page)
+    try:
+        data_holiday = calendar.get_holiday_calendar(
+            from_date=datetime.today(),
+            to_date=datetime.today()+timedelta(days=next_days),
+            countries=countries_holidays)
+    except Exception as error:
+        print('Holiday calendar request failed:', error)
+        data_holiday = pd.DataFrame(columns=[
+            'id', 'date', 'time', 'zone', 'currency',
+            'importance', 'event', 'actual', 'forecast', 'previous'
+            ])
     
     def pre_filter_events(df):
         base_drop_cols = ['id', 'actual', 'forecast', 'previous']
@@ -181,6 +195,7 @@ def get_calendar_from_investing(next_days=7):
     data_employ_ = pre_filter_events(data_employ)
     data_cb_ = pre_filter_events(data_cb)
     data_activity_ = pre_filter_events(data_activity)
+    data_holiday_ = pre_filter_events(data_holiday)
     
     #MANUAL FILTERINGS
     data_inflation_manual = data_inflation_[
@@ -290,7 +305,8 @@ def get_calendar_from_investing(next_days=7):
         data_inflation_deduped.assign(category='inflation'),
         data_employ_deduped.assign(category='employ'),
         data_cb_manual.assign(category='cb'),
-        data_activity_deduped.assign(category='activity')]).drop('event_lower', axis=1).drop_duplicates()
+        data_activity_deduped.assign(category='activity'),
+        data_holiday_.assign(category='holiday')]).drop('event_lower', axis=1).drop_duplicates()
     
     return data
 
@@ -334,7 +350,7 @@ def get_com_object(object_type='my_calendar'):
     if object_type == 'calendar':
         return namespace.GetDefaultFolder(9) #9=olFolderCalendar
     if object_type == 'my_calendar':
-        return namespace.GetDefaultFolder(9).Folders['FX'] # nome exato da subpasta
+        return namespace.GetDefaultFolder(9).Folders['YourCalendar'] # nome exato da subpasta
 
 def find_existing(subject_ls:list, start_dt:datetime, obj_type='my_calendar'):
     """Retorna uma lista de AppointmentItems com mesmo assunto e data exata."""
@@ -418,7 +434,8 @@ def add_to_agenda():
         end = start + pd.Timedelta(minutes=30)
     
         subject = f"{zone} | {evento}"
-        subject_zone_code = f"{zone_to_code.get(zone)} | {evento}"
+        zone_code = zone_to_code.get(zone, zone)
+        subject_zone_code = f"{zone_code} | {evento}"
 
         exists = find_existing([subject, subject_zone_code], start)
         if exists:
@@ -445,7 +462,8 @@ def add_to_agenda():
                 'cb':'Dark', 
                 'inflation':'Green',
                 'activity': 'Blue',
-                'employ': 'Red'}
+                'employ': 'Red',
+                'holiday': 'Orange'}
             
             return category_color_meta.get(category)
         

@@ -7,6 +7,8 @@ Created on Mon Jan 19 09:54:42 2026
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from html import unescape
+from html.parser import HTMLParser
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import pandas as pd
@@ -108,6 +110,61 @@ def _iso_range_from_ddmmyyyy(
     return start, end
 
 
+def _to_yyyy_mm_dd(value: Optional[Union[str, date, datetime]]) -> Optional[str]:
+    """
+    Normaliza datas para o formato YYYY-mm-dd.
+    Aceita datetime/date, dd/mm/yyyy e yyyy-mm-dd.
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+
+    if isinstance(value, date):
+        return value.strftime("%Y-%m-%d")
+
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+
+        for dt_fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+            try:
+                return datetime.strptime(raw, dt_fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+
+    raise ValueError("Data invalida. Use datetime/date, 'dd/mm/yyyy' ou 'yyyy-mm-dd'.")
+
+
+def _date_range_to_yyyy_mm_dd(
+    from_date: Optional[Union[str, date, datetime]],
+    to_date: Optional[Union[str, date, datetime]],
+) -> Tuple[str, str]:
+    """
+    Converte intervalo de datas para formato YYYY-mm-dd.
+    Se ambos forem None, usa hoje.
+    """
+    if from_date is None and to_date is None:
+        day = date.today().strftime("%Y-%m-%d")
+        return day, day
+
+    if from_date is None or to_date is None:
+        raise ValueError("Se passar 'from_date', passe tambem 'to_date'.")
+
+    start = _to_yyyy_mm_dd(from_date)
+    end = _to_yyyy_mm_dd(to_date)
+
+    if start is None or end is None:
+        raise ValueError("from_date/to_date invalidos.")
+
+    if start > end:
+        raise ValueError("to_date deve ser >= from_date.")
+
+    return start, end
+
+
 def _map_countries_to_ids(countries: Optional[Sequence[str]]) -> Optional[List[int]]:
     if not countries:
         return None
@@ -117,6 +174,35 @@ def _map_countries_to_ids(countries: Optional[Sequence[str]]) -> Optional[List[i
         v = COUNTRY_ID_FILTERS.get(key)
         if v is not None:
             ids.append(int(v))
+    return ids or None
+
+
+def _coerce_country_ids(countries: Optional[Sequence[Union[str, int]]]) -> Optional[List[int]]:
+    """
+    Aceita paises por nome (lower case investpy-style), string numerica ou int.
+    """
+    if not countries:
+        return None
+
+    ids: List[int] = []
+    for country in countries:
+        if isinstance(country, int):
+            ids.append(int(country))
+            continue
+
+        if isinstance(country, str):
+            raw = country.strip()
+            if not raw:
+                continue
+
+            if raw.isdigit():
+                ids.append(int(raw))
+                continue
+
+            mapped_id = COUNTRY_ID_FILTERS.get(_norm(raw))
+            if mapped_id is not None:
+                ids.append(int(mapped_id))
+
     return ids or None
 
 
@@ -164,6 +250,75 @@ def _build_requests_session(
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
+
+
+class _HolidayHtmlTableParser(HTMLParser):
+    """Parser simples para extrair linhas da tabela de feriados do HTML retornado."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows: List[List[str]] = []
+        self._current_row: List[str] = []
+        self._current_cell: List[str] = []
+        self._inside_cell = False
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        if tag == "tr":
+            self._current_row = []
+            return
+
+        if tag in {"td", "th"}:
+            self._inside_cell = True
+            self._current_cell = []
+
+    def handle_data(self, data: str) -> None:
+        if self._inside_cell:
+            self._current_cell.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"td", "th"} and self._inside_cell:
+            raw_text = "".join(self._current_cell).replace("\xa0", " ")
+            text = unescape(" ".join(raw_text.split())).strip()
+            self._current_row.append(text)
+            self._inside_cell = False
+            self._current_cell = []
+            return
+
+        if tag == "tr" and self._current_row:
+            self.rows.append(self._current_row)
+
+
+def _parse_holiday_html_table(raw_html: str) -> pd.DataFrame:
+    """
+    Parseia o HTML da resposta do endpoint de feriados em colunas:
+    date_raw, zone, exchange_name, holiday
+    """
+    out_cols = ["date_raw", "zone", "exchange_name", "holiday"]
+
+    if not isinstance(raw_html, str) or not raw_html.strip():
+        return pd.DataFrame(columns=out_cols)
+
+    parser = _HolidayHtmlTableParser()
+    parser.feed(raw_html)
+
+    rows: List[List[str]] = []
+    for row in parser.rows:
+        if len(row) < 4:
+            continue
+
+        row4 = [str(x).strip() for x in row[:4]]
+
+        if _norm(row4[0]) == "date" and _norm(row4[1]) == "country":
+            continue
+
+        rows.append(row4)
+
+    if not rows:
+        return pd.DataFrame(columns=out_cols)
+
+    df = pd.DataFrame(rows, columns=out_cols)
+    df["date_raw"] = df["date_raw"].replace("", pd.NA).ffill()
+    return df
 
 
 # =============================================================================
@@ -229,6 +384,7 @@ class DataFrameParser:
             
 class InvestingAPIClient:
     BASE_URL = "https://endpoints.investing.com/pd-instruments/v1"
+    HOLIDAY_URL = "https://www.investing.com/holiday-calendar/Service/getCalendarFilteredData"
 
     def __init__(self, config: Optional[InvestingApiConfig] = None, session: Optional[requests.Session] = None):
         self.config = config or InvestingApiConfig()
@@ -342,6 +498,121 @@ class InvestingAPIClient:
         print('MATCHED COLUMNS: ', matched_cols)
         print('UNMATCHED COLUMNS: ', unmatched_cols)
         return df[matched_cols]
+
+    def get_holiday_calendar(
+        self,
+        countries: Optional[List[Union[str, int]]] = None,
+        from_date: Optional[Union[str, date, datetime]] = None,
+        to_date: Optional[Union[str, date, datetime]] = None,
+        *,
+        limit_from: int = 0,
+        extra_payload: Optional[Mapping[str, Any]] = None,
+        headers: Optional[Mapping[str, str]] = None,
+    ) -> pd.DataFrame:
+        """
+        Busca feriados de mercado no endpoint legado da pagina Holiday Calendar.
+
+        Endpoint:
+        https://www.investing.com/holiday-calendar/Service/getCalendarFilteredData
+        """
+        start_date, end_date = _date_range_to_yyyy_mm_dd(from_date, to_date)
+        country_ids = _coerce_country_ids(countries)
+
+        holiday_headers = {
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://www.investing.com/holiday-calendar/",
+        }
+        if headers:
+            holiday_headers.update(dict(headers))
+        base_cols = ["id", "date", "time", "zone", "currency", "importance", "event", "actual", "forecast", "previous"]
+
+        def fetch_single_country(country_id: Optional[int]) -> pd.DataFrame:
+            payload: Dict[str, Any] = {
+                "dateFrom": start_date,
+                "dateTo": end_date,
+                "country": "" if country_id is None else str(int(country_id)),
+                "currentTab": "custom",
+                "submitFilters": "1",
+                "limit_from": str(int(limit_from)),
+            }
+
+            if extra_payload:
+                payload.update(dict(extra_payload))
+
+            resp = self.session.post(
+                self.HOLIDAY_URL,
+                headers=self._headers(holiday_headers),
+                data=payload,
+                timeout=self.config.timeout_s,
+                verify=self.config.verify_tls,
+            )
+            resp.raise_for_status()
+
+            raw_html = ""
+            try:
+                parsed = resp.json()
+                if isinstance(parsed, Mapping):
+                    raw_html = str(parsed.get("data", "") or "")
+            except ValueError:
+                raw_html = resp.text
+
+            parsed_df = _parse_holiday_html_table(raw_html)
+
+            if parsed_df.empty:
+                return pd.DataFrame(columns=base_cols)
+
+            parsed_df["date_raw"] = parsed_df["date_raw"].replace("", pd.NA).ffill()
+            parsed_df["datetime"] = pd.to_datetime(parsed_df["date_raw"], errors="coerce")
+            parsed_df = parsed_df.dropna(subset=["datetime"])
+
+            if parsed_df.empty:
+                return pd.DataFrame(columns=base_cols)
+
+            requested_start = pd.to_datetime(start_date)
+            requested_end = pd.to_datetime(end_date)
+            parsed_df = parsed_df[parsed_df["datetime"].between(requested_start, requested_end)]
+
+            if parsed_df.empty:
+                return pd.DataFrame(columns=base_cols)
+
+            parsed_df["zone"] = (
+                parsed_df["zone"]
+                .fillna("")
+                .astype(str)
+                .str.replace(r"\s+", " ", regex=True)
+                .str.strip()
+            )
+            parsed_df["event"] = parsed_df["holiday"].fillna("").astype(str).str.strip()
+            parsed_df.loc[parsed_df["event"].eq(""), "event"] = "Market Holiday"
+
+            parsed_df["date"] = parsed_df["datetime"].dt.strftime("%d/%m/%Y")
+            parsed_df["time"] = "00:00"
+            parsed_df["currency"] = ""
+            parsed_df["importance"] = "low"
+            parsed_df["actual"] = ""
+            parsed_df["forecast"] = ""
+            parsed_df["previous"] = ""
+
+            parsed_df["id"] = (
+                "holiday_"
+                + parsed_df["datetime"].dt.strftime("%Y%m%d")
+                + "_"
+                + parsed_df["zone"].str.lower().str.replace(r"[^a-z0-9]+", "_", regex=True).str.strip("_")
+                + "_"
+                + parsed_df["event"].str.lower().str.replace(r"[^a-z0-9]+", "_", regex=True).str.strip("_")
+            )
+
+            return parsed_df[base_cols].drop_duplicates().reset_index(drop=True)
+
+        country_ids_to_fetch = list(dict.fromkeys(country_ids)) if country_ids else [None]
+        frames = [fetch_single_country(country_id) for country_id in country_ids_to_fetch]
+        frames = [frame for frame in frames if not frame.empty]
+
+        if not frames:
+            return pd.DataFrame(columns=base_cols)
+
+        return pd.concat(frames, ignore_index=True).drop_duplicates().reset_index(drop=True)
 
 
 # =============================================================================
