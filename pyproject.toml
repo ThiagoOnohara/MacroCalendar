@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "macro-calendar"
+version = "2.0.0"
+description = "CLI para consultar eventos macroeconômicos e sincronizá-los com o Outlook Classic"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0,<3",
+  "requests>=2.31,<3",
+  "urllib3>=2.0,<3",
+  "pywin32>=306; platform_system == 'Windows'",
+]
+
+[project.scripts]
+macrocalendar = "macrocalendar.cli:main"
+
+[tool.setuptools]
+packages = ["macrocalendar"]
+py-modules = ["calendar_events", "eco_calendar", "investing_calendar", "investing_constants"]

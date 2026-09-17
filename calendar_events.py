@@ -3,16 +3,13 @@
 @author: thiago.onohara
 """
 
-import matplotlib.pyplot as plt
 import pandas as pd
-import numpy as np
-import sys
 from functools import reduce
 from datetime import datetime, timedelta
 import re
-from investing_calendar import InvestingAPIClient
-import xlwings as xw
-import win32com.client
+from investing_calendar import InvestingAPIClient, InvestingApiConfig
+from macrocalendar.config import AppConfig
+from macrocalendar.outlook import OutlookClient
 
 calendar = InvestingAPIClient()
 
@@ -134,50 +131,91 @@ def dedupe_top(df, threshold=0.7, top_n_words=15):
         else: 
             return group
 
-    result = df.groupby('group_key', group_keys=False).apply(filter_group)
-    return result.drop(columns='group_key').reset_index(drop=True).sort_values(by=['date', 'time', 'zone'])
+    data_columns = [column for column in df.columns if column != 'group_key']
+    result = df.groupby('group_key', group_keys=False)[data_columns].apply(filter_group)
+    return result.reset_index(drop=True).sort_values(by=['date', 'time', 'zone'])
 
-def get_calendar_from_investing(next_days=7):
-    countries_inflation =list(country_total.keys())
-    countries_central_banks =list(country_cb.keys())
-    countries_employment =list(country_employment.keys())
-    countries_activity =list(country_total.keys())
-    countries_holidays =list(country_total.keys())
-
-    #Inflation Events
-    data_inflation = calendar.get_economic_calendar(
-        from_date=datetime.today(),
-        to_date=datetime.today()+timedelta(days=next_days),
-        categories=[
-         'inflation'],
-        countries=countries_inflation)
-    #Employment Events
-    data_employ = calendar.get_economic_calendar(
-        from_date=datetime.today(),
-        to_date=datetime.today()+timedelta(days=next_days),
-        categories=['employment'],
-        countries=countries_employment)
-    #Central Banks
-    data_cb = calendar.get_economic_calendar(
-        from_date=datetime.today(),
-        to_date=datetime.today()+timedelta(days=next_days),
-        categories=['central_banks'],
-        countries=countries_central_banks)
-    #Activity
-    data_activity = calendar.get_economic_calendar(
-        from_date=datetime.today(),
-        to_date=datetime.today()+timedelta(days=next_days),
-        categories=['economic_activity'],
-        countries=countries_activity)
-
-    #Market Holidays (legacy endpoint from Investing Holiday Calendar page)
+def _timezone_to_investing_offset(timezone):
+    """Return the current IANA timezone offset in Investing's GMT format."""
     try:
-        data_holiday = calendar.get_holiday_calendar(
+        offset = pd.Timestamp.now(tz=timezone).utcoffset()
+    except Exception as exc:
+        raise ValueError(f"Timezone inválido: {timezone}") from exc
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = '+' if total_minutes >= 0 else '-'
+    total_minutes = abs(total_minutes)
+    hours, minutes = divmod(total_minutes, 60)
+    return f"GMT {sign}{hours}:{minutes:02d}"
+
+
+def get_calendar_from_investing(
+    next_days=7,
+    include_holidays=True,
+    countries=None,
+    categories=None,
+    timezone='America/Sao_Paulo',
+    verify_tls=None,
+):
+    countries_inflation = list(country_total.keys())
+    countries_central_banks = list(country_cb.keys())
+    countries_employment = list(country_employment.keys())
+    countries_activity = list(country_total.keys())
+    countries_holidays = list(country_total.keys())
+
+    if countries:
+        countries_inflation = countries_central_banks = countries_employment = countries_activity = list(countries)
+        countries_holidays = list(countries)
+
+    requested_categories = {
+        str(category).strip().lower() for category in (categories or [
+            'inflation', 'employment', 'central_banks', 'economic_activity'
+        ])
+    }
+    if 'activity' in requested_categories:
+        requested_categories.add('economic_activity')
+
+    investing_timezone = _timezone_to_investing_offset(timezone)
+    api_calendar = calendar
+    current_config = getattr(calendar, 'config', None)
+    current_verify_tls = getattr(current_config, 'verify_tls', verify_tls)
+    if verify_tls is not None and current_verify_tls != verify_tls:
+        api_calendar = InvestingAPIClient(InvestingApiConfig(verify_tls=verify_tls))
+
+    empty_events = lambda: pd.DataFrame(columns=[
+        'id', 'date', 'time', 'zone', 'currency',
+        'importance', 'event', 'actual', 'forecast', 'previous'
+    ])
+
+    def fetch(category, country_list):
+        if category not in requested_categories:
+            return empty_events()
+        return api_calendar.get_economic_calendar(
             from_date=datetime.today(),
             to_date=datetime.today()+timedelta(days=next_days),
-            countries=countries_holidays)
-    except Exception as error:
-        print('Holiday calendar request failed:', error)
+            time_zone=investing_timezone,
+            categories=[category],
+            countries=country_list,
+            output_timezone=timezone)
+
+    data_inflation = fetch('inflation', countries_inflation)
+    data_employ = fetch('employment', countries_employment)
+    data_cb = fetch('central_banks', countries_central_banks)
+    data_activity = fetch('economic_activity', countries_activity)
+
+    # Market holidays use a legacy Investing endpoint and can be disabled.
+    if include_holidays:
+        try:
+            data_holiday = api_calendar.get_holiday_calendar(
+                from_date=datetime.today(),
+                to_date=datetime.today()+timedelta(days=next_days),
+                countries=countries_holidays)
+        except Exception as error:
+            print('Holiday calendar request failed:', error)
+            data_holiday = pd.DataFrame(columns=[
+                'id', 'date', 'time', 'zone', 'currency',
+                'importance', 'event', 'actual', 'forecast', 'previous'
+                ])
+    else:
         data_holiday = pd.DataFrame(columns=[
             'id', 'date', 'time', 'zone', 'currency',
             'importance', 'event', 'actual', 'forecast', 'previous'
@@ -311,9 +349,23 @@ def get_calendar_from_investing(next_days=7):
     return data
 
 #%% #SETUP
-def get_and_filter_events(next_days=10):
+def get_and_filter_events(
+    next_days=10,
+    include_holidays=True,
+    countries=None,
+    categories=None,
+    timezone='America/Sao_Paulo',
+    verify_tls=None,
+):
     #export_eco_data_global()
-    eco_data = get_calendar_from_investing(next_days).sort_values(by='date')
+    eco_data = get_calendar_from_investing(
+        next_days,
+        include_holidays=include_holidays,
+        countries=countries,
+        categories=categories,
+        timezone=timezone,
+        verify_tls=verify_tls,
+    ).sort_values(by='date')
     eco_data_fcast = eco_data.copy()
     #Remove Month Reference on event 
     eco_data_fcast = eco_data_fcast.drop_duplicates()
@@ -322,62 +374,46 @@ def get_and_filter_events(next_days=10):
     eco_data_fcast_importance['datetime'] = eco_data_fcast_importance['date'].dt.strftime('%Y-%m-%d') + ' ' + eco_data_fcast_importance['time'].astype('string').copy()
     return eco_data_fcast_importance.drop(['date', 'time'], axis=1).sort_values(by=['datetime', 'zone'])
 
-#%% xw funcs
-@xw.sub
 def export_events():
-    events_df = get_and_filter_events()
-    
-    try:
-        wb = xw.Book.caller()
-        events_sh = wb.sheets('EVENTS')
-        events_sh.range('A5').expand().clear()    
-        events_sh.range('A5').value = events_df 
-    except:
-        return events_df
-    
-@xw.sub
+    """Compatibility name retained for callers of the former Excel flow."""
+    return get_and_filter_events()
+
+
 def logging_func():
     print('__name__', __name__)
     print('__file__', __file__)
     print('__doc__', __doc__)
     print('__package__', __package__)
 
-def get_com_object(object_type='my_calendar'):    
-    outlook = win32com.client.Dispatch('Outlook.Application')
-    namespace = outlook.GetNamespace('MAPI')
+def get_com_object(object_type='my_calendar', calendar_name=None):
+    """Compatibility helper around the new Outlook adapter."""
+    client = OutlookClient(calendar_name=calendar_name).connect()
     if object_type == 'outlook':
-        return outlook
+        return client.application
     if object_type == 'calendar':
-        return namespace.GetDefaultFolder(9) #9=olFolderCalendar
+        return client.namespace.GetDefaultFolder(9)
     if object_type == 'my_calendar':
-        return namespace.GetDefaultFolder(9).Folders['YourCalendar'] # nome exato da subpasta
+        return client.calendar
+    raise ValueError(f'object_type inválido: {object_type}')
 
-def find_existing(subject_ls:list, start_dt:datetime, obj_type='my_calendar'):
-    """Retorna uma lista de AppointmentItems com mesmo assunto e data exata."""
-    items = get_com_object(object_type=obj_type).Items
-    # Outlook guarda Start como string “YYYY-MM-DD HH:MM”
-    # precisamos filtrar pela data exata (pode incluir hora, se quiser)
-    matched = [item for item in items
-               if item.Subject in subject_ls 
-               and item.Start.strftime('%Y-%m-%d') == start_dt.strftime('%Y-%m-%d')]
-    
-    if len(matched) > 1:
-        print('Removendo Itens Duplicados: ', len(matched))
-        duplicated_items = matched[1:]
-        for duplicated_item in duplicated_items:
-            print('Removendo: ', duplicated_item.Subject, duplicated_item.Start.strftime('%Y-%m-%d %H:%M'))
-            duplicated_item.Delete()
-    return list(matched[:1])  # pode retornar 0 ou mais
+def find_existing(subject_ls:list, start_dt:datetime, obj_type='my_calendar', calendar_name=None):
+    """Retorna compromissos com mesmo assunto e data/hora exatas.
+
+    Duplicatas não são apagadas automaticamente para evitar alterar eventos
+    criados manualmente pelo usuário.
+    """
+    client = OutlookClient(calendar_name=calendar_name).connect()
+    matched = []
+    for subject in subject_ls:
+        matched.extend(client.existing_appointments(subject, start_dt))
+    unique = []
+    for item in matched:
+        if not any(item is existing for existing in unique):
+            unique.append(item)
+    return unique
 
 
-@xw.sub
-def add_to_agenda():
-    mail_adress = '@your_domain.com.br'
-    emails = ['your_email']
-    emails_completos = [i+mail_adress for i in emails]
-    # Suponha df com colunas: date (YYYY-MM-DD), time (HH:MM), zone (e.g. 'America/Sao_Paulo'), event (str)
-    
-    zone_to_code = {
+ZONE_TO_CODE = {
         'United States': 'USD',
         'Euro Zone': 'EUR',
         'Brazil': 'BRL',
@@ -405,96 +441,71 @@ def add_to_agenda():
         'Italy': 'ITL',
         'Chile': 'CLP', 
         'Colombia': 'COP'}
-    
-    try:
-        wb = xw.Book.caller()
-        events_sh = wb.sheets('EVENTS')
-        range_address = 'A5:K1000'
-        df = events_sh.range(range_address).options(pd.DataFrame, index=False).value.dropna(axis=0, how='all')
-        print('Eventos na Planilha:', df, sep='\n')
-        task = False
-    except:
-        df = get_and_filter_events()
-        task = True
-        
-    #%% Export Eventos to Sheet Events
+
+
+def _format_subject(row):
+    region = str(row['zone']).replace('  ', ' ')
+    zone = ' '.join(map(str.capitalize, region.split())).strip()
+    zone_code = ZONE_TO_CODE.get(zone, zone)
+    return f"{zone_code} | {row['event']}"
+
+
+def sync_events(df, config=None, dry_run=False, client=None):
+    """Create or update events in Outlook, preserving the existing pipeline."""
+    config = config or AppConfig()
+    config.validate()
+    outlook = client or OutlookClient(config.calendar_name).connect()
+    counts = {'created': 0, 'updated': 0, 'duplicates': 0}
 
     for idx, row in df.iterrows():
+        start = pd.to_datetime(row['datetime'], errors='coerce')
+        if pd.isna(start):
+            raise ValueError(f"Evento {idx} possui datetime inválido: {row['datetime']!r}")
 
-        # formata datetime com timezone
-        region = row['zone'].replace('  ', ' ')
-        zone = ' '.join(map(str.capitalize, region.split())).strip()
-        category = row['category']
-        start = row['datetime'] if not task else datetime.strptime(row['datetime'], '%Y-%m-%d %H:%M')
-        print('start', start)
-        
-        remind_before = 15 #minutes  # por exemplo, duração 15min
-        evento = row['event']
-         # Monta o datetime com timezone
-        end = start + pd.Timedelta(minutes=30)
-    
-        subject = f"{zone} | {evento}"
-        zone_code = zone_to_code.get(zone, zone)
-        subject_zone_code = f"{zone_code} | {evento}"
+        subject = _format_subject(row)
+        category = f"MacroCalendar - {row.get('category', 'event')}"
+        try:
+            action, has_duplicates = outlook.upsert_event(
+                subject=subject,
+                start=start.to_pydatetime() if hasattr(start, 'to_pydatetime') else start,
+                duration_minutes=config.duration_minutes,
+                reminder_minutes=config.reminder_minutes,
+                category=category,
+                dry_run=dry_run,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Falha ao sincronizar '{subject}': {exc}") from exc
+        counts['updated' if action == 'atualizar' else 'created'] += 1
+        if has_duplicates:
+            counts['duplicates'] += 1
+        suffix = ' (dry-run)' if dry_run else ''
+        duplicate_note = ' [mais de uma correspondência]' if has_duplicates else ''
+        display_datetime = start.strftime('%d/%m/%Y %H:%M')
+        print(f"  {action.capitalize()}: {display_datetime} | {subject}{suffix}{duplicate_note}")
 
-        exists = find_existing([subject, subject_zone_code], start)
-        if exists:
-            # atualiza o primeiro que encontrar
-            appt = exists[0]
-            print(f"→ Atualizando evento existente: {subject}")
-        else:
-            # cria novo
-            appt = get_com_object(object_type='my_calendar').Items.Add(1)
-            print(f"→ Criando novo evento: {subject}")
-        
-        appt.Subject = subject_zone_code
-        appt.Start = start.strftime('%Y-%m-%d %H:%M')
-        appt.End = end.strftime('%Y-%m-%d %H:%M')
-    
-        # Deixa como "Free" no calendário, mas com lembrete
-        appt.BusyStatus = 0             # 0 = olFree
-        appt.ReminderSet = True
-        appt.ReminderMinutesBeforeStart = remind_before
-        
-        def category_to_color(category:str):
-            
-            category_color_meta = {
-                'cb':'Dark', 
-                'inflation':'Green',
-                'activity': 'Blue',
-                'employ': 'Red',
-                'holiday': 'Orange'}
-            
-            return category_color_meta.get(category)
-        
-        color = category_to_color(category)
-        appt.Categories = f"{color} category"
-    
-        # marca os Required Attendees, mas NÃO converte em Meeting    
-        # Aqui: transforma lista em string "email1; email2; ..."
-        if isinstance(emails_completos, list) and emails_completos:
-            appt.RequiredAttendees = "; ".join(emails_completos)
-        else:
-            appt.RequiredAttendees = ""
-    
-        # só salva—não envia convites
-        appt.Save()
-        print(f"✔ Appointment '{subject}' às {start} (free) criado com lembrete.")
-        
-def send_logging_email():
-        
-    import win32com.client as win32
-    outlook = win32.Dispatch('outlook.application')
-    mail = outlook.CreateItem(0)
-    mail.To = 'your_email@your_domain.com.br'
-    mail.Subject = 'TASK COMPLETA -> Calendário Atualizado'
-    mail.Send()
+    return counts
+
+
+def add_to_agenda(df=None, calendar_name=None, dry_run=False, config=None):
+    """Backward-compatible entry point for the CLI and existing scripts."""
+    config = config or AppConfig()
+    if calendar_name is not None:
+        config.calendar_name = calendar_name
+    if df is None:
+        df = get_and_filter_events(
+            config.days,
+            include_holidays=config.include_holidays,
+            countries=config.countries,
+            categories=config.categories,
+            timezone=config.timezone,
+            verify_tls=config.verify_tls,
+        )
+    return sync_events(df, config=config, dry_run=dry_run)
 
 def _run_scheduled_task():
     """Funções que só devem rodar no Task Scheduler"""
     print('Running AS TASK!!!')
     add_to_agenda()
-    send_logging_email()
 
 #print('__name__', __name__)
 

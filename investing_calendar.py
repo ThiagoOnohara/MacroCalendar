@@ -26,8 +26,6 @@ except Exception:  # pragma: no cover
 # =============================================================================
 from investing_constants import (
     COUNTRY_ID_FILTERS,
-    CATEGORY_FILTERS,
-    IMPORTANCE_RATINGS,
     TIME_FILTERS,
 )
 
@@ -329,7 +327,7 @@ def _parse_holiday_html_table(raw_html: str) -> pd.DataFrame:
 class InvestingApiConfig:
     domain_id: int = 1
     timeout_s: int = 30
-    verify_tls: bool = False  # mantém o default que você já vinha usando no wrapper
+    verify_tls: bool = False
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -344,8 +342,7 @@ class DataFrameParser:
         s: pd.Series,
         tz: str = "America/Sao_Paulo",
     ) -> pd.Series:
-        print("--- Parsing Occurrence Time -> Datetime ---")
-        # utc=True cria tz-aware em UTC; depois tz_convert e remove tz (naive) :contentReference[oaicite:1]{index=1}
+        # utc=True cria tz-aware em UTC; depois converte e remove o timezone.
         return (
             pd.to_datetime(s, utc=True, errors="coerce")
             .dt.tz_convert(tz)
@@ -354,14 +351,11 @@ class DataFrameParser:
 
     @staticmethod
     def _parse_country_id(s: pd.Series) -> pd.Series:
-        print("--- Parsing Country ID -> Name ---")
         reversed_map = dict(zip(COUNTRY_ID_FILTERS.values(), COUNTRY_ID_FILTERS.keys()))
         return s.map(reversed_map)
 
     @staticmethod
     def _parse_event_name(df_: pd.DataFrame) -> pd.Series:
-        print("--- Parsing Event Name ---")
-        
         if 'event_cycle_suffix' in df_.columns:
             s = (
                 df_["short_name"]
@@ -373,8 +367,6 @@ class DataFrameParser:
             return s
         
         else:
-            print('"event_cycle_suffix" not in df_.columns')
-            print('dataframe columns: ', df_.columns)
             s = (
                 df_["short_name"]
                 + " "
@@ -452,6 +444,7 @@ class InvestingAPIClient:
         *,
         limit: int = 300,
         extra_params: Optional[Mapping[str, Any]] = None,
+        output_timezone: str = DataFrameParser.DEFAULT_TZ,
     ) -> pd.DataFrame:
         if time_filter not in TIME_FILTERS:
             raise ValueError(f"time_filter inválido: {time_filter}. Use {list(TIME_FILTERS.keys())}")
@@ -472,32 +465,37 @@ class InvestingAPIClient:
             extra_params=extra_params,
         )
 
-        print("TOTAL EVENTS (dict keys): ", len(raw), sep='\n'*3)
-        print('EVENTS: ', pd.json_normalize(raw['events']), sep='\n'*3)
-        print('OCCURENCES: ', pd.json_normalize(raw['occurrences']), sep='\n'*3)
+        raw_events = raw.get("events", [])
+        raw_occurrences = raw.get("occurrences", [])
+        if not raw_events or not raw_occurrences:
+            return pd.DataFrame(
+                columns=["id", "date", "time", "zone", "currency", "importance", "event", "actual", "forecast", "previous"]
+            )
 
-        raw_event_df = pd.json_normalize(raw["events"])
-        raw_occ_df = pd.json_normalize(raw["occurrences"])
+        raw_event_df = pd.json_normalize(raw_events)
+        raw_occ_df = pd.json_normalize(raw_occurrences)
 
         # Merge Events and Occurrences
         df = raw_event_df.merge(raw_occ_df, on=["event_id"])
 
         # Parsing
         df["id"] = df["event_id"]
-        df["datetime"] = DataFrameParser._parse_occurrence_time_sp_naive(df["occurrence_time"])
+        df["datetime"] = DataFrameParser._parse_occurrence_time_sp_naive(
+            df["occurrence_time"], tz=output_timezone
+        )
         df["date"] = df["datetime"].dt.strftime("%d/%m/%Y")
         df["time"] = df["datetime"].dt.strftime("%H:%M")
         df["zone"] = DataFrameParser._parse_country_id(df["country_id"])
         df["event"] = DataFrameParser._parse_event_name(df)
         if 'actual' in df.columns:
-            df['actual'] = df['actual'].fillna('').astype(str) + df['unit'].fillna('').astype(str)
+            unit = df['unit'].fillna('').astype(str) if 'unit' in df.columns else ''
+            df['actual'] = df['actual'].fillna('').astype(str) + unit
         base_cols = pd.Index(["id", "date", "time", "zone", "currency", "importance", "event", "actual", "forecast", "previous"])
         matched_cols = df.columns.intersection(base_cols)
-        unmatched_cols = df.columns.difference(base_cols)
-
-        print('MATCHED COLUMNS: ', matched_cols)
-        print('UNMATCHED COLUMNS: ', unmatched_cols)
-        return df[matched_cols]
+        result = df[matched_cols]
+        if importances is not None and "importance" in result.columns:
+            result = result[result["importance"].isin(importances)]
+        return result.reset_index(drop=True)
 
     def get_holiday_calendar(
         self,

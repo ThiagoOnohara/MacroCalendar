@@ -1,81 +1,49 @@
-# -*- coding: utf-8 -*-
-"""
-@author: thiago.onohara
+"""Compatibility wrapper for the former investpy-based EcoCalendar API.
+
+The implementation now uses the local HTTP client. This module is kept so
+existing scripts importing ``EcoCalendar`` do not break immediately. New code
+should import ``InvestingAPIClient`` from ``investing_calendar``.
 """
 
-import investpy
-from datetime import date, timedelta,datetime
+from datetime import datetime
+
 import pandas as pd
-from abc import ABC
-import os
 
-investpy.user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.5845.111 Safari/537.3'
+from investing_calendar import InvestingAPIClient
 
-class USER(ABC):
-    email = 'your_email'
-    name = os.getlogin()
-
-'''Getting Next Inflation Release Dates'''
 
 class EcoCalendar:
-    '''
-   Economic Categories:
-   'credit',
-   'inflation'
-   'employment'
-   'activity'
-   'central_banks'
-   'balance'
-   'bonds'
-   
-   Country (str format: lower case)
-   EXAMPLES
-   - united states
-   - china
-   - brazil
-   - hungary
-   - mexico
-   - south africa
-   
-   To see available categories:
-       EcoCalendar.available_categories
-    '''
-    def __init__(
-            self,
-            dt_format='%d/%m/%Y'):
-        
-        self.available_categories = [
-            'credit',
-            'inflation',
-            'employment',
-            'activity',
-            'central_banks',
-            'balance', 
-            'bonds']
-        
-        self.dt_format = dt_format
-        
-    def get_economic_calendar(
-            self,
-            from_date:datetime,
-            to_date:datetime,
-            categories:list=None,
-            countries:list=None) -> pd.DataFrame:
-        
-        
-        data = investpy.economic_calendar(
-            from_date=from_date.strftime(self.dt_format),
-            to_date=to_date.strftime(self.dt_format),
-            categories=categories,
-            countries=countries)
-        
-        if data.empty:
-            raise Exception(f'''Dataframe Returns Empty 
-                            Request {USER.name}''')
-        else:
-            print('Calendar obtained to: ', data.dropna(subset='currency')['currency'].unique())
-            print('Calendar obtained to: ', data.dropna(subset='currency')['zone'].unique())
-            return data.dropna(subset='currency')
-            
-    
+    """Backward-compatible facade over :class:`InvestingAPIClient`."""
 
+    available_categories = [
+        "credit",
+        "inflation",
+        "employment",
+        "activity",
+        "economic_activity",
+        "central_banks",
+        "balance",
+        "bonds",
+    ]
+
+    def __init__(self, dt_format="%d/%m/%Y", client=None):
+        self.dt_format = dt_format
+        self.client = client or InvestingAPIClient()
+
+    def get_economic_calendar(
+        self,
+        from_date: datetime,
+        to_date: datetime,
+        categories: list | None = None,
+        countries: list | None = None,
+    ) -> pd.DataFrame:
+        normalized_categories = [
+            "economic_activity" if category == "activity" else category
+            for category in (categories or [])
+        ] or None
+        return self.client.get_economic_calendar(
+            from_date=from_date,
+            to_date=to_date,
+            categories=normalized_categories,
+            countries=countries,
+        )
